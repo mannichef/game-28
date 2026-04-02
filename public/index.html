@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Bomb Tag 💣</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}body{background:#111;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;font-family:monospace;color:#fff;overflow:hidden;touch-action:none}
+canvas{border:2px solid #333;border-radius:8px;background:#1a1a2e}
+#lobby{position:absolute;display:flex;flex-direction:column;align-items:center;gap:10px;z-index:10}
+#lobby h1{font-size:36px;color:#f80}#lobby input{padding:8px;font-size:16px;background:#222;color:#fff;border:1px solid #555;border-radius:4px;text-align:center}
+#lobby button{padding:10px 30px;font-size:18px;background:#f80;color:#000;border:none;border-radius:4px;cursor:pointer;font-weight:bold}
+#lobby button:hover{background:#fa0}#players{color:#aaa;font-size:14px}
+.hidden{display:none!important}
+#joystick{position:fixed;bottom:30px;left:50px;width:120px;height:120px;border-radius:50%;background:rgba(255,255,255,.1);border:2px solid rgba(255,255,255,.2);display:none}
+#knob{width:40px;height:40px;border-radius:50%;background:rgba(255,136,0,.5);position:absolute;top:40px;left:40px}
+#hud{position:absolute;top:5px;color:#f80;font-size:14px;text-align:center;pointer-events:none;z-index:5}
+</style></head><body>
+<div id="hud" class="hidden"></div>
+<div id="lobby"><h1>💣 BOMB TAG</h1><input id="nameIn" placeholder="Your name" maxlength="12"><button id="readyBtn">READY</button><div id="players"></div></div>
+<canvas id="c"></canvas>
+<div id="joystick"><div id="knob"></div></div>
+<script>
+const C=document.getElementById('c'),X=C.getContext('2d'),lobby=document.getElementById('lobby'),hud=document.getElementById('hud');
+const W=800,H=600;C.width=W;C.height=H;
+const scale=Math.min((innerWidth-20)/W,(innerHeight-60)/H,1);C.style.width=W*scale+'px';C.style.height=H*scale+'px';
+
+const AC=new(window.AudioContext||window.webkitAudioContext)();
+function tone(f,d,t='square',v=.1){const o=AC.createOscillator(),g=AC.createGain();o.type=t;o.frequency.value=f;g.gain.setValueAtTime(v,AC.currentTime);g.gain.exponentialRampToValueAtTime(.001,AC.currentTime+d);o.connect(g);g.connect(AC.destination);o.start();o.stop(AC.currentTime+d);}
+function tickSound(fast){tone(800+(fast?400:0),.05,'sine',.08);}
+function explodeSound(){for(let i=0;i<5;i++)setTimeout(()=>tone(80+Math.random()*100,.3,'sawtooth',.15),i*60);}
+function tagSound(){tone(440,.1,'triangle',.15);setTimeout(()=>tone(660,.1,'triangle',.15),60);}
+function victorySound(){[523,659,784,1047].forEach((f,i)=>setTimeout(()=>tone(f,.3,'sine',.12),i*150));}
+
+let myId,myColor,obstacles=[],arena={w:W,h:H},players=[],bombRatio=0,particles=[],screenShake=0,gameActive=false;
+const ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host);
+
+ws.onmessage=e=>{
+  const m=JSON.parse(e.data);
+  if(m.type==='welcome'){myId=m.id;myColor=m.color;obstacles=m.obstacles;arena=m.arena;}
+  if(m.type==='lobby'){
+    lobby.classList.remove('hidden');hud.classList.add('hidden');gameActive=false;
+    document.getElementById('players').innerHTML=m.players.map(p=>`<span style="color:${p.ready?'#0f0':'#888'}">${p.name}${p.ready?' ✓':''}</span>`).join(' | ');
+  }
+  if(m.type==='roundStart'){lobby.classList.add('hidden');hud.classList.remove('hidden');players=m.players;gameActive=true;}
+  if(m.type==='state'){players=m.players;bombRatio=m.bombTimer;if(bombRatio>.7&&Math.random()<bombRatio*.3)tickSound(bombRatio>.9);}
+  if(m.type==='tagged'){tagSound();}
+  if(m.type==='explode'){explodeSound();screenShake=15;for(let i=0;i<40;i++){const a=Math.random()*Math.PI*2,s=2+Math.random()*5;particles.push({x:m.x,y:m.y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,life:40,col:`hsl(${Math.random()*60},100%,50%)`});}}
+  if(m.type==='gameOver'){victorySound();hud.innerHTML=`<h2>🏆 ${m.winner} wins!</h2>`+m.scores.map(s=>`${s.name}: ${s.wins}`).join(' | ');}
+};
+
+document.getElementById('readyBtn').onclick=()=>{AC.resume();const n=document.getElementById('nameIn').value;if(n)ws.send(JSON.stringify({type:'setName',name:n}));ws.send(JSON.stringify({type:'ready'}));};
+
+// Controls
+const keys={};
+document.addEventListener('keydown',e=>{keys[e.code]=true;});
+document.addEventListener('keyup',e=>{keys[e.code]=false;});
+
+// Touch joystick
+const joy=document.getElementById('joystick'),knob=document.getElementById('knob');
+let joyActive=false,joyVX=0,joyVY=0,joyCenter={x:0,y:0};
+if('ontouchstart'in window)joy.style.display='block';
+joy.addEventListener('touchstart',e=>{joyActive=true;const r=joy.getBoundingClientRect();joyCenter={x:r.left+60,y:r.top+60};e.preventDefault();},{passive:false});
+document.addEventListener('touchmove',e=>{if(!joyActive)return;const t=e.touches[0];let dx=t.clientX-joyCenter.x,dy=t.clientY-joyCenter.y;const d=Math.sqrt(dx*dx+dy*dy);if(d>40){dx=dx/d*40;dy=dy/d*40;}joyVX=dx/40;joyVY=dy/40;knob.style.left=(40+dx)+'px';knob.style.top=(40+dy)+'px';e.preventDefault();},{passive:false});
+document.addEventListener('touchend',()=>{joyActive=false;joyVX=0;joyVY=0;knob.style.left='40px';knob.style.top='40px';});
+
+setInterval(()=>{
+  if(!gameActive)return;
+  let vx=0,vy=0;
+  if(keys.ArrowUp||keys.KeyW)vy=-1;if(keys.ArrowDown||keys.KeyS)vy=1;
+  if(keys.ArrowLeft||keys.KeyA)vx=-1;if(keys.ArrowRight||keys.KeyD)vx=1;
+  if(joyActive){vx=joyVX;vy=joyVY;}
+  ws.send(JSON.stringify({type:'move',vx,vy}));
+},33);
+
+function draw(){
+  requestAnimationFrame(draw);
+  const sx=screenShake>0?(Math.random()-.5)*screenShake:0;
+  const sy=screenShake>0?(Math.random()-.5)*screenShake:0;
+  if(screenShake>0)screenShake--;
+  X.save();X.translate(sx,sy);
+  X.fillStyle='#1a1a2e';X.fillRect(0,0,W,H);
+
+  // Obstacles
+  obstacles.forEach(o=>{X.fillStyle='#333';X.fillRect(o.x,o.y,o.w,o.h);X.strokeStyle='#555';X.strokeRect(o.x,o.y,o.w,o.h);});
+
+  // Players
+  players.forEach(p=>{
+    X.beginPath();X.arc(p.x,p.y,15,0,Math.PI*2);
+    X.fillStyle=p.color;X.shadowBlur=p.hasBomb?20:8;X.shadowColor=p.hasBomb?'#f00':p.color;X.fill();
+    X.shadowBlur=0;
+    // Name
+    X.fillStyle='#fff';X.font='11px monospace';X.textAlign='center';X.fillText(p.name,p.x,p.y-22);
+    // Bomb
+    if(p.hasBomb){
+      X.font='20px serif';X.fillText('💣',p.x-10,p.y+6);
+      // Timer ring
+      X.beginPath();X.arc(p.x,p.y,20,-Math.PI/2,-Math.PI/2+bombRatio*Math.PI*2);
+      X.strokeStyle=bombRatio>.7?'#f00':'#f80';X.lineWidth=3;X.stroke();X.lineWidth=1;
+    }
+    if(p.id===myId){X.strokeStyle='#fff';X.lineWidth=2;X.beginPath();X.arc(p.x,p.y,18,0,Math.PI*2);X.stroke();X.lineWidth=1;}
+  });
+
+  // Particles
+  particles=particles.filter(p=>{p.x+=p.vx;p.y+=p.vy;p.vy+=.1;p.life--;X.fillStyle=p.col;X.globalAlpha=p.life/40;X.fillRect(p.x-2,p.y-2,4,4);return p.life>0;});
+  X.globalAlpha=1;
+  X.restore();
+}
+draw();
+</script></body></html>

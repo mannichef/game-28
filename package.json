@@ -1,0 +1,8 @@
+{
+  "name": "bomb-tag",
+  "version": "1.0.0",
+  "description": "Multiplayer Bomb Tag - hot potato with a bomb",
+  "main": "server.js",
+  "scripts": {"start": "node server.js"},
+  "dependencies": {"ws": "^8.0.0"}
+}
