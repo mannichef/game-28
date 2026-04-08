@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Bomb Tag 💣</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#111;color:#eee;font-family:'Segoe UI',system-ui,sans-serif;overflow:hidden;touch-action:none;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh}
+#lobby{text-align:center;position:absolute;z-index:10}
+#lobby h1{font-size:3em;margin-bottom:.2em}
+#lobby .sub{color:#f80;font-size:1.2em;margin-bottom:1em}
+#lobby input{padding:10px 16px;font-size:1.1em;border:2px solid #f80;background:#222;color:#fff;border-radius:8px;width:220px;text-align:center}
+#lobby button{padding:10px 32px;font-size:1.1em;border:none;border-radius:8px;cursor:pointer;margin:8px;font-weight:bold}
+#readyBtn{background:#f80;color:#000}#readyBtn:hover{background:#fa0}
+#readyBtn.on{background:#0a0;color:#fff}
+#playerList{margin:16px auto;max-width:300px;text-align:left}
+#playerList div{padding:4px 8px;border-radius:4px;margin:2px 0}
+#playerList .ready{color:#0f0}
+canvas{display:none;border-radius:8px}
+#hud{display:none;position:absolute;top:10px;left:50%;transform:translateX(-50%);text-align:center;z-index:5;pointer-events:none}
+#hud .round{font-size:1.2em;color:#aaa}
+#hud .timer{font-size:2.5em;font-weight:bold;font-family:monospace}
+#hud .msg{font-size:1.5em;color:#f80;margin-top:4px}
+#scoreboard{display:none;position:absolute;top:10px;right:10px;z-index:5;background:rgba(0,0,0,.7);padding:12px;border-radius:8px;font-size:.9em}
+#scoreboard h3{color:#f80;margin-bottom:6px}
+#spectator{display:none;position:absolute;bottom:60px;left:50%;transform:translateX(-50%);z-index:5;background:rgba(200,0,0,.7);padding:8px 20px;border-radius:8px;font-size:1.2em}
+#joystick{display:none;position:absolute;bottom:30px;left:50px;width:140px;height:140px;z-index:20}
+</style></head><body>
+<div id="lobby">
+  <h1>💣 Bomb Tag</h1>
+  <div class="sub">Don't be the one holding it when it blows!</div>
+  <input id="nameInput" placeholder="Your name" maxlength="16" autofocus>
+  <br><button id="readyBtn" onclick="doReady()">Ready</button>
+  <div id="playerList"></div>
+</div>
+<div id="hud"><div class="round"></div><div class="timer"></div><div class="msg"></div></div>
+<div id="scoreboard"><h3>Scores</h3><div id="scoreRows"></div></div>
+<div id="spectator">💀 You're out! Spectating...</div>
+<canvas id="c"></canvas>
+<div id="joystick"><canvas id="jc" width="140" height="140"></canvas></div>
+
+<script>
+// Audio via Web Audio API
+const actx = new (window.AudioContext||window.webkitAudioContext)();
+function playTone(freq,dur,type='square',vol=.15){const o=actx.createOscillator(),g=actx.createGain();o.type=type;o.frequency.value=freq;g.gain.value=vol;o.connect(g);g.connect(actx.destination);o.start();g.gain.exponentialRampToValueAtTime(.001,actx.currentTime+dur);o.stop(actx.currentTime+dur);}
+function playTick(fast){playTone(fast?900:600,.05,'square',.1);}
+function playExplosion(){const buf=actx.createBuffer(1,actx.sampleRate*.6,actx.sampleRate),d=buf.getChannelData(0);for(let i=0;i<d.length;i++)d[i]=(Math.random()*2-1)*Math.pow(1-i/d.length,1.5);const s=actx.createBufferSource(),g=actx.createGain();s.buffer=buf;g.gain.value=.6;s.connect(g);g.connect(actx.destination);s.start();}
+function playTag(){playTone(440,.08);setTimeout(()=>playTone(660,.08),80);}
+function playVictory(){[523,659,784,1047].forEach((f,i)=>setTimeout(()=>playTone(f,.3,'triangle',.2),i*150));}
+
+// State
+let ws, myId, obstacles=[], arena={w:1200,h:800}, gamePlayers=new Map(), gameState='lobby';
+let bombHolder=null, bombElapsed=0, bombDuration=15000, roundNum=0;
+let shakeX=0, shakeY=0, shakeT=0;
+let particles=[], lastTick=0;
+const keys={};
+const canvas=document.getElementById('c'), ctx=canvas.getContext('2d');
+const jCanvas=document.getElementById('jc'), jCtx=jCanvas.getContext('2d');
+let jActive=false, jX=0, jY=0;
+
+// Colors per player id
+const COLORS=['#ff4444','#44aaff','#44ff44','#ffaa00','#ff44ff','#44ffff'];
+function pColor(id){return COLORS[(id-1)%COLORS.length];}
+
+function connect(){
+  const proto=location.protocol==='https:'?'wss':'ws';
+  ws=new WebSocket(`${proto}://${location.host}`);
+  ws.onmessage=e=>{const m=JSON.parse(e.data);handle(m);};
+  ws.onclose=()=>setTimeout(connect,2000);
+  ws.onopen=()=>{const n=document.getElementById('nameInput').value.trim();if(n)ws.send(JSON.stringify({type:'setName',name:n}));};
+}
+
+function handle(m){
+  switch(m.type){
+    case 'welcome':
+      myId=m.id; obstacles=m.obstacles; arena=m.arena; gameState=m.gameState;
+      m.players.forEach(p=>gamePlayers.set(p.id,p));
+      updateLobby(); updateScoreboard(m.scores);
+      break;
+    case 'playerJoined':
+      gamePlayers.set(m.player.id,{...m.player,alive:true,ready:false});
+      updateLobby(); break;
+    case 'playerLeft':
+      gamePlayers.delete(m.id); updateLobby(); break;
+    case 'nameChange':
+      if(gamePlayers.has(m.id)) gamePlayers.get(m.id).name=m.name;
+      updateLobby(); break;
+    case 'playerReady':
+      if(gamePlayers.has(m.id)) gamePlayers.get(m.id).ready=true;
+      updateLobby(); break;
+    case 'roundStart':
+      gameState='playing'; roundNum=m.round; bombHolder=m.bombHolder; bombDuration=m.bombDuration; bombElapsed=0;
+      m.players.forEach(p=>{const e=gamePlayers.get(p.id); if(e) Object.assign(e,p);});
+      showGame(); break;
+    case 'state':
+      m.players.forEach(s=>{const p=gamePlayers.get(s.id);if(p){p.x=s.x;p.y=s.y;}});
+      bombHolder=m.bombHolder; bombElapsed=m.bombElapsed; bombDuration=m.bombDuration;
+      // Ticking sound
+      const remain=bombDuration-bombElapsed;
+      const interval=remain<3000?100:remain<6000?200:400;
+      if(Date.now()-lastTick>interval){lastTick=Date.now();playTick(remain<3000);}
+      break;
+    case 'tagged':
+      bombHolder=m.to; playTag(); break;
+    case 'explosion':
+      playExplosion(); spawnParticles(m.x,m.y); shakeT=Date.now();
+      if(gamePlayers.has(m.playerId)) gamePlayers.get(m.playerId).alive=false;
+      const me=gamePlayers.get(myId);
+      if(me&&!me.alive) document.getElementById('spectator').style.display='block';
+      break;
+    case 'matchEnd':
+      gameState='lobby'; bombHolder=null;
+      if(m.winner) playVictory();
+      document.getElementById('spectator').style.display='none';
+      updateScoreboard(m.scores);
+      showLobby(m.winner);
+      m.scores.forEach(s=>{const p=gamePlayers.get(s.id);if(p){p.ready=false;p.alive=true;}});
+      updateLobby();
+      break;
+    case 'full': alert('Game is full!'); break;
+  }
+}
+
+function updateLobby(){
+  const el=document.getElementById('playerList'); el.innerHTML='';
+  for(const p of gamePlayers.values()){
+    const d=document.createElement('div');
+    d.textContent=(p.ready?'✅ ':'⬜ ')+p.name+(p.id===myId?' (you)':'');
+    if(p.ready) d.className='ready';
+    el.appendChild(d);
+  }
+}
+
+function updateScoreboard(scores){
+  if(!scores) return;
+  const el=document.getElementById('scoreRows');
+  el.innerHTML=scores.sort((a,b)=>b.score-a.score).map(s=>`<div style="color:${pColor(s.id)}">${s.name}: ${s.score}</div>`).join('');
+}
+
+function doReady(){
+  actx.resume();
+  const n=document.getElementById('nameInput').value.trim()||'Anon';
+  if(ws&&ws.readyState===1){
+    ws.send(JSON.stringify({type:'setName',name:n}));
+    ws.send(JSON.stringify({type:'ready'}));
+    document.getElementById('readyBtn').className='on';
+    document.getElementById('readyBtn').textContent='Ready!';
+  }
+}
+
+function showGame(){
+  document.getElementById('lobby').style.display='none';
+  canvas.style.display='block';
+  document.getElementById('hud').style.display='block';
+  document.getElementById('scoreboard').style.display='block';
+  document.getElementById('spectator').style.display='none';
+  if('ontouchstart' in window) document.getElementById('joystick').style.display='block';
+  resizeCanvas();
+}
+function showLobby(winner){
+  document.getElementById('lobby').style.display='block';
+  canvas.style.display='none';
+  document.getElementById('hud').style.display='none';
+  document.getElementById('joystick').style.display='none';
+  document.getElementById('readyBtn').className='';
+  document.getElementById('readyBtn').textContent='Ready';
+  if(winner){
+    const sub=document.querySelector('#lobby .sub');
+    sub.textContent=`🏆 ${winner.name} wins!`;
+    setTimeout(()=>{sub.textContent="Don't be the one holding it when it blows!";},5000);
+  }
+}
+
+// Input
+document.addEventListener('keydown',e=>{keys[e.key]=true;sendInput();});
+document.addEventListener('keyup',e=>{keys[e.key]=false;sendInput();});
+function sendInput(){
+  if(!ws||ws.readyState!==1) return;
+  const inp={up:!!(keys.w||keys.W||keys.ArrowUp),down:!!(keys.s||keys.S||keys.ArrowDown),
+    left:!!(keys.a||keys.A||keys.ArrowLeft),right:!!(keys.d||keys.D||keys.ArrowRight)};
+  if(jActive){inp.jx=jX;inp.jy=jY;}
+  ws.send(JSON.stringify({type:'input',input:inp}));
+}
+
+// Joystick
+const jEl=document.getElementById('joystick');
+function jPos(t){const r=jCanvas.getBoundingClientRect();let x=(t.clientX-r.left-70)/70,y=(t.clientY-r.top-70)/70;const m=Math.sqrt(x*x+y*y);if(m>1){x/=m;y/=m;}return{x,y};}
+jEl.addEventListener('touchstart',e=>{e.preventDefault();jActive=true;const p=jPos(e.touches[0]);jX=p.x;jY=p.y;sendInput();},{passive:false});
+jEl.addEventListener('touchmove',e=>{e.preventDefault();const p=jPos(e.touches[0]);jX=p.x;jY=p.y;sendInput();},{passive:false});
+jEl.addEventListener('touchend',e=>{e.preventDefault();jActive=false;jX=0;jY=0;sendInput();},{passive:false});
+
+// Particles
+function spawnParticles(x,y){for(let i=0;i<40;i++){const a=Math.random()*Math.PI*2,s=2+Math.random()*5;particles.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,life:1,color:['#ff4400','#ffaa00','#ff8800','#ffff00'][i%4]});}}
+
+// Canvas
+function resizeCanvas(){
+  const s=Math.min(window.innerWidth/arena.w,window.innerHeight/arena.h)*.95;
+  canvas.width=arena.w*s; canvas.height=arena.h*s;
+  canvas.scale=s;
+}
+window.addEventListener('resize',resizeCanvas);
+
+function draw(){
+  requestAnimationFrame(draw);
+  if(gameState!=='playing'&&gameState!=='roundEnd') return;
+  const s=canvas.scale||1;
+  ctx.save();
+  // Shake
+  let sx=0,sy=0;
+  if(Date.now()-shakeT<500){const i=1-(Date.now()-shakeT)/500;sx=(Math.random()-.5)*20*i;sy=(Math.random()-.5)*20*i;}
+  ctx.setTransform(s,0,0,s,sx*s,sy*s);
+  // BG
+  ctx.fillStyle='#1a1a2e';ctx.fillRect(0,0,arena.w,arena.h);
+  // Grid
+  ctx.strokeStyle='#ffffff08';ctx.lineWidth=1;
+  for(let x=0;x<arena.w;x+=40){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,arena.h);ctx.stroke();}
+  for(let y=0;y<arena.h;y+=40){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(arena.w,y);ctx.stroke();}
+  // Obstacles
+  ctx.fillStyle='#333355';ctx.strokeStyle='#555577';ctx.lineWidth=2;
+  for(const o of obstacles){ctx.fillRect(o.x,o.y,o.w,o.h);ctx.strokeRect(o.x,o.y,o.w,o.h);}
+  // Players
+  for(const p of gamePlayers.values()){
+    if(!p.alive) continue;
+    const isBomb=p.id===bombHolder;
+    // Shadow
+    ctx.fillStyle='rgba(0,0,0,.3)';ctx.beginPath();ctx.ellipse(p.x+3,p.y+3,18,14,0,0,Math.PI*2);ctx.fill();
+    // Body
+    ctx.fillStyle=pColor(p.id);ctx.strokeStyle=isBomb?'#ff0':'#fff';ctx.lineWidth=isBomb?3:1.5;
+    ctx.beginPath();ctx.arc(p.x,p.y,18,0,Math.PI*2);ctx.fill();ctx.stroke();
+    // Eyes
+    ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(p.x-6,p.y-4,5,0,Math.PI*2);ctx.fill();
+    ctx.beginPath();ctx.arc(p.x+6,p.y-4,5,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle='#000';ctx.beginPath();ctx.arc(p.x-5,p.y-4,2.5,0,Math.PI*2);ctx.fill();
+    ctx.beginPath();ctx.arc(p.x+7,p.y-4,2.5,0,Math.PI*2);ctx.fill();
+    // Name
+    ctx.fillStyle='#fff';ctx.font='bold 11px sans-serif';ctx.textAlign='center';
+    ctx.fillText(p.name,p.x,p.y-26);
+    // Bomb
+    if(isBomb){
+      const bx=p.x,by=p.y-8;
+      // Glow
+      const remain=bombDuration-bombElapsed;
+      const pulse=Math.sin(Date.now()/(remain<3000?50:remain<6000?100:200))*0.3+0.7;
+      ctx.fillStyle=`rgba(255,${remain<3000?0:100},0,${pulse*0.3})`;
+      ctx.beginPath();ctx.arc(bx,by,30,0,Math.PI*2);ctx.fill();
+      // Bomb body
+      ctx.fillStyle='#222';ctx.beginPath();ctx.arc(bx,by,12,0,Math.PI*2);ctx.fill();
+      ctx.strokeStyle='#f80';ctx.lineWidth=2;ctx.stroke();
+      // Fuse
+      ctx.strokeStyle='#fa0';ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(bx+8,by-8);
+      ctx.quadraticCurveTo(bx+14,by-16,bx+10,by-20);ctx.stroke();
+      // Spark
+      const sp=Math.random();
+      ctx.fillStyle=sp>.5?'#ff0':'#f80';ctx.beginPath();ctx.arc(bx+10,by-20,2+Math.random()*2,0,Math.PI*2);ctx.fill();
+      // Timer text
+      const sec=Math.max(0,remain/1000).toFixed(1);
+      ctx.fillStyle=remain<3000?'#f00':'#ff0';ctx.font='bold 14px monospace';
+      ctx.fillText(sec+'s',bx,by+30);
+    }
+    // Me indicator
+    if(p.id===myId){ctx.strokeStyle='#fff';ctx.lineWidth=1;ctx.setLineDash([3,3]);ctx.beginPath();ctx.arc(p.x,p.y,24,0,Math.PI*2);ctx.stroke();ctx.setLineDash([]);}
+  }
+  // Particles
+  for(let i=particles.length-1;i>=0;i--){
+    const p=particles[i];p.x+=p.vx;p.y+=p.vy;p.vx*=.96;p.vy*=.96;p.life-=.02;
+    if(p.life<=0){particles.splice(i,1);continue;}
+    ctx.globalAlpha=p.life;ctx.fillStyle=p.color;
+    ctx.fillRect(p.x-3,p.y-3,6,6);
+  }
+  ctx.globalAlpha=1;
+  ctx.restore();
+  // HUD
+  const remain=bombDuration-bombElapsed;
+  const sec=Math.max(0,remain/1000).toFixed(1);
+  document.querySelector('#hud .round').textContent='Round '+roundNum;
+  const te=document.querySelector('#hud .timer');te.textContent=sec+'s';te.style.color=remain<3000?'#f00':remain<6000?'#f80':'#fff';
+  const me=gamePlayers.get(myId);
+  document.querySelector('#hud .msg').textContent=me&&me.alive?(myId===bombHolder?'🔥 PASS THE BOMB!':'🏃 RUN!'):'';
+  // Joystick
+  if(jActive||document.getElementById('joystick').style.display==='block'){
+    jCtx.clearRect(0,0,140,140);
+    jCtx.fillStyle='rgba(255,255,255,.1)';jCtx.beginPath();jCtx.arc(70,70,60,0,Math.PI*2);jCtx.fill();
+    jCtx.fillStyle='rgba(255,136,0,.5)';jCtx.beginPath();jCtx.arc(70+jX*40,70+jY*40,20,0,Math.PI*2);jCtx.fill();
+  }
+}
+draw();
+
+// Enter key = ready
+document.getElementById('nameInput').addEventListener('keydown',e=>{if(e.key==='Enter')doReady();});
+
+connect();
+</script></body></html>
